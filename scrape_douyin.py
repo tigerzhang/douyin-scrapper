@@ -5,6 +5,7 @@ import os
 import requests
 import hashlib
 from datetime import datetime
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
@@ -54,12 +55,20 @@ def verify_login_status(page):
         time.sleep(3)
 
 def scrape_douyin_comments(url):
+    # Extract unique ID from URL for directory name
+    parsed_url = urlparse(url)
+    url_path = parsed_url.path.strip('/')
+    url_id = url_path.split('/')[-1] if url_path else "default"
+    
+    # Define base and specific directories
+    base_data_dir = os.path.join(os.getcwd(), "scraped_data")
+    target_dir = os.path.join(base_data_dir, url_id)
+    image_dir = os.path.join(target_dir, "images")
     user_data_dir = os.path.join(os.getcwd(), "douyin_user_data")
-    image_dir = os.path.join(os.getcwd(), "comment_images")
     
     if not os.path.exists(image_dir):
         os.makedirs(image_dir)
-        print(f"Created image directory: {image_dir}")
+        print(f"Created directory: {image_dir}")
     
     p = sync_playwright().start()
     try:
@@ -245,7 +254,7 @@ def scrape_douyin_comments(url):
                                                 print(f"  Image download failed: {img_err}")
                                         
                                         if os.path.exists(local_path):
-                                            image_path = os.path.join("comment_images", filename)
+                                            image_path = os.path.join("images", filename)
                                         break # Take the first large image
                         except Exception as e:
                             print(f"  Image extraction error: {e}")
@@ -322,10 +331,11 @@ def scrape_douyin_comments(url):
                  time.sleep(5)
 
         # Save
-        with open('comments.json', 'w', encoding='utf-8') as f:
+        result_file = os.path.join(target_dir, 'comments.json')
+        with open(result_file, 'w', encoding='utf-8') as f:
             json.dump(comments_data, f, ensure_ascii=False, indent=2)
             
-        print(f"Done. Saved {len(comments_data)} comments.")
+        print(f"Done. Saved {len(comments_data)} comments to {result_file}")
         
         # Keep open for a bit
         time.sleep(2)
