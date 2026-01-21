@@ -12,6 +12,62 @@ from playwright.sync_api import sync_playwright
 # Load environment variables
 load_dotenv()
 
+def check_for_verification(page):
+    """Checks for captcha or verification overlays and waits for manual resolution."""
+    verification_selectors = [
+        '.captcha-container',
+        '#captcha_container',
+        '.verify-board',
+        '#captcha_container',
+        '.vc-mask',
+        '.captcha-modal',
+        '[class*="captcha"]',
+        '[class*="verify"]'
+    ]
+    
+    found_any = False
+    for selector in verification_selectors:
+        try:
+            el = page.query_selector(selector)
+            if el and el.is_visible():
+                found_any = True
+                break
+        except:
+            continue
+    
+    # Check for captcha iframe if selectors didn't match
+    if not found_any:
+        try:
+            iframes = page.query_selector_all('iframe')
+            for iframe in iframes:
+                src = iframe.get_attribute('src') or ""
+                if "verifycenter/captcha" in src or "captcha" in src.lower():
+                    found_any = True
+                    break
+        except:
+             pass
+            
+    if found_any:
+        print("\n!!! VERIFICATION DETECTED !!!")
+        print("Please resolve the captcha/verification in the browser window.")
+        print("Waiting for verification to be dismissed...")
+        while True:
+            still_visible = False
+            for selector in verification_selectors:
+                try:
+                    el = page.query_selector(selector)
+                    if el and el.is_visible():
+                        still_visible = True
+                        break
+                except:
+                    continue
+            if not still_visible:
+                print("Verification cleared. Resuming...\n")
+                break
+            time.sleep(2)
+        return True
+    return False
+
 def verify_login_status(page):
     print("Verifying login status...")
     while True:
@@ -53,6 +109,76 @@ def verify_login_status(page):
              print("   (Login modal is visible - Please scan QR code)")
              
         time.sleep(3)
+
+def self_extract_comment(item, image_dir=None):
+    """Helper to extract data from a single comment/reply item."""
+    try:
+        # Nickname extraction
+        user_el = item.query_selector('._uYOTNYZ')
+        user_text = user_el.inner_text().strip() if user_el else "Unknown"
+        if "\n作者" in user_text:
+            user_text = user_text.replace("\n作者", " [Author]")
+
+        # Content extraction
+        content_el = item.query_selector('.C7LroK_h')
+        content_text = content_el.inner_text().strip() if content_el else "[No Content]"
+        if content_text == "[No Content]": return None
+
+        # Meta extraction
+        msg_time = ""
+        msg_location = ""
+        try:
+            meta_el = item.query_selector('.fJhvAqos')
+            if not meta_el:
+                 spans = item.query_selector_all('span')
+                 for sp in spans:
+                      txt = sp.inner_text()
+                      if "·" in txt and ("前" in txt or "20" in txt):
+                          meta_el = sp
+                          break
+            if meta_el:
+                meta_text = meta_el.inner_text()
+                if "·" in meta_text:
+                    parts = meta_text.split("·")
+                    msg_time = parts[0].strip()
+                    msg_location = parts[1].strip() if len(parts) > 1 else ""
+                else:
+                    msg_time = meta_text
+        except: pass
+
+        # Image extraction
+        image_path = None
+        if image_dir:
+            try:
+                img_els = item.query_selector_all('img')
+                for img in img_els:
+                    width = img.evaluate("el => el.naturalWidth")
+                    if width > 30: 
+                        src = img.get_attribute('src')
+                        if src and src.startswith('http'):
+                            url_hash = hashlib.md5(src.encode()).hexdigest()
+                            filename = f"{url_hash}.jpg"
+                            local_path = os.path.join(image_dir, filename)
+                            if not os.path.exists(local_path):
+                                response = requests.get(src, timeout=10)
+                                if response.status_code == 200:
+                                    with open(local_path, 'wb') as img_f:
+                                        img_f.write(response.content)
+                            if os.path.exists(local_path):
+                                image_path = os.path.join("images", filename)
+                            break
+            except: pass
+
+        return {
+            "user": user_text,
+            "content": content_text,
+            "time": msg_time,
+            "location": msg_location,
+            "image_path": image_path,
+            "scrape_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except:
+        return None
 
 def scrape_douyin_comments(url):
     # Extract unique ID from URL for directory name
@@ -178,100 +304,90 @@ def scrape_douyin_comments(url):
             total_scrolls += 1
             print(f"--- Scroll #{total_scrolls} ---")
             
-            # 1. Extract Comments
-            # Use data-e2e="comment-item" as primary selector as found by subagent
-            comment_items = page.query_selector_all('[data-e2e="comment-item"]')
-            print(f"Visible comment items: {len(comment_items)}")
-            
-            new_in_this_batch = 0
-            
-            for item in comment_items:
-                try:
-                    # Nickname extraction
-                    user_el = item.query_selector('._uYOTNYZ')
-                    user_text = user_el.inner_text() if user_el else "Unknown"
+            # 1. Verification Check
+            check_for_verification(page)
 
-                    # Content extraction
-                    content_el = item.query_selector('.C7LroK_h')
-                    content_text = content_el.inner_text() if content_el else "[No Content]"
-
-                    # Time/Location from span inside .fJhvAqos or similar
-                    msg_time = ""
-                    msg_location = ""
-                    
+            # 2. Expand Replies
+            # Find all expand buttons. We do this before extraction to get domestic replies.
+            print("Checking for reply expansion buttons...")
+            try:
+                # Limit expansion to visible buttons to avoid clicking ones we already dealt with
+                expand_btns = page.query_selector_all('.comment-reply-expand-btn')
+                expanded_count = 0
+                for btn in expand_btns:
                     try:
-                        meta_el = item.query_selector('.fJhvAqos')
-                        if not meta_el:
-                             # Search all spans in this item
-                             spans = item.query_selector_all('span')
-                             for sp in spans:
-                                 txt = sp.inner_text()
-                                 if "·" in txt and ("前" in txt or "20" in txt):
-                                     meta_el = sp
-                                     break
-                        
-                        if meta_el:
-                            meta_text = meta_el.inner_text()
-                            if "·" in meta_text:
-                                parts = meta_text.split("·")
-                                msg_time = parts[0].strip()
-                                msg_location = parts[1].strip() if len(parts) > 1 else ""
-                            else:
-                                msg_time = meta_text
+                        if btn.is_visible():
+                            text = btn.inner_text()
+                            if "展开" in text or "更多" in text:
+                                btn.click()
+                                expanded_count += 1
+                                # Small wait for animation/loading
+                                time.sleep(random.uniform(0.5, 1.0))
                     except:
-                        pass
-                    
-                    # Dedupe
-                    unique_id = f"{user_text}_{content_text[:20]}_{msg_time}"
-                    
-                    if unique_id not in seen_ids and content_text != "[No Content]":
-                        # --- New: Image Extraction ---
-                        image_path = None
-                        try:
-                            # Look for img tags within the comment item
-                            img_els = item.query_selector_all('img')
-                            for img in img_els:
-                                # Filter out small icons/emojis by naturalWidth if possible
-                                # Or just skip known emoji classes if identifiable
-                                width = img.evaluate("el => el.naturalWidth")
-                                if width > 30: # Likely a real image, not an emoji
-                                    src = img.get_attribute('src')
-                                    if src and src.startswith('http'):
-                                        # Create unique filename
-                                        url_hash = hashlib.md5(src.encode()).hexdigest()
-                                        filename = f"{url_hash}.jpg"
-                                        local_path = os.path.join(image_dir, filename)
-                                        
-                                        # Download if not already saved
-                                        if not os.path.exists(local_path):
-                                            try:
-                                                response = requests.get(src, timeout=10)
-                                                if response.status_code == 200:
-                                                    with open(local_path, 'wb') as img_f:
-                                                        img_f.write(response.content)
-                                                    print(f"  Saved comment image: {filename}")
-                                            except Exception as img_err:
-                                                print(f"  Image download failed: {img_err}")
-                                        
-                                        if os.path.exists(local_path):
-                                            image_path = os.path.join("images", filename)
-                                        break # Take the first large image
-                        except Exception as e:
-                            print(f"  Image extraction error: {e}")
+                        continue
+                if expanded_count > 0:
+                    print(f"  -> Expanded {expanded_count} reply threads.")
+                    time.sleep(1) # Extra wait for all replies to load
+            except Exception as e:
+                print(f"Reply expansion error: {e}")
 
-                        seen_ids.add(unique_id)
-                        comments_data.append({
-                            "user": user_text,
-                            "content": content_text,
-                            "time": msg_time,
-                            "location": msg_location,
-                            "image_path": image_path,
-                            "scrape_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        })
-                        new_in_this_batch += 1
+            # 3. Extract Comments Hierarchically
+            new_in_this_batch = 0
+            try:
+                # Find all comment items. We'll filter them to separate main comments from replies.
+                all_items = page.query_selector_all('[data-e2e="comment-item"]')
+                
+                # Identify main comments: they are NOT inside a replyContainer
+                main_comments = []
+                for item in all_items:
+                    # Check if this item has an ancestor with class 'replyContainer'
+                    # Or check its structure - main comments usually are the only ones with significant margins/layout
+                    # A more reliable way: an item is a MAIN comment if it's NOT inside another data-e2e="comment-item"
+                    # Wait, replies used to be siblings, now they are nested.
+                    # Let's check if the item is inside a .replyContainer
+                    is_reply = item.evaluate("el => !!el.closest('.replyContainer')")
+                    if not is_reply:
+                        main_comments.append(item)
+                
+                for top_el in main_comments:
+                    try:
+                        comment_data = self_extract_comment(top_el, image_dir)
+                        if not comment_data: continue
                         
-                except Exception as e:
-                    continue
+                        unique_id = f"{comment_data['user']}_{comment_data['content'][:20]}_{comment_data['time']}"
+                        
+                        # Find all replies nested INSIDE this main comment
+                        replies = []
+                        reply_container = top_el.query_selector('.replyContainer')
+                        if reply_container:
+                            reply_items = reply_container.query_selector_all('[data-e2e="comment-item"]')
+                            for r_item in reply_items:
+                                r_data = self_extract_comment(r_item, image_dir)
+                                if r_data:
+                                    replies.append(r_data)
+                        
+                        if unique_id not in seen_ids:
+                            comment_data["replies"] = replies
+                            seen_ids.add(unique_id)
+                            comments_data.append(comment_data)
+                            new_in_this_batch += 1
+                        else:
+                            # Main comment seen, check for new replies
+                            existing_comment = next((c for c in comments_data if f"{c['user']}_{c['content'][:20]}_{c['time']}" == unique_id), None)
+                            if existing_comment:
+                                if "replies" not in existing_comment:
+                                    existing_comment["replies"] = []
+                                
+                                for r in replies:
+                                    r_uid = f"{r['user']}_{r['content'][:20]}_{r['time']}"
+                                    if not any(f"{er['user']}_{er['content'][:20]}_{er['time']}" == r_uid for er in existing_comment["replies"]):
+                                        existing_comment["replies"].append(r)
+                                        new_in_this_batch += 1
+                        
+                    except Exception as item_err:
+                        continue
+            except Exception as e:
+                print(f"Extraction error: {e}")
 
             if new_in_this_batch > 0:
                 print(f"  -> Extracted {new_in_this_batch} new comments. Total: {len(comments_data)}")
