@@ -180,6 +180,34 @@ def self_extract_comment(item, image_dir=None):
     except:
         return None
 
+def update_manifest(base_dir, url_id, url, count):
+    """Updates the global manifest.json with the latest scrape info."""
+    manifest_path = os.path.join(base_dir, "manifest.json")
+    manifest = []
+    
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+        except:
+            pass
+            
+    # Update or add entry
+    entry = {
+        "id": url_id,
+        "url": url,
+        "scrape_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "comment_count": count
+    }
+    
+    # Remove existing entry for this ID if it exists
+    manifest = [item for item in manifest if item["id"] != url_id]
+    manifest.insert(0, entry) # Most recent first
+    
+    with open(manifest_path, 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    print(f"Updated manifest: {manifest_path}")
+
 def scrape_douyin_comments(url):
     # Extract unique ID from URL for directory name
     parsed_url = urlparse(url)
@@ -452,6 +480,9 @@ def scrape_douyin_comments(url):
             json.dump(comments_data, f, ensure_ascii=False, indent=2)
             
         print(f"Done. Saved {len(comments_data)} comments to {result_file}")
+        
+        # Update Manifest
+        update_manifest(base_data_dir, url_id, url, len(comments_data))
         
         # Keep open for a bit
         time.sleep(2)
