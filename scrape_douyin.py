@@ -5,7 +5,11 @@ import os
 import requests
 import hashlib
 from datetime import datetime
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+
+# Load environment variables
+load_dotenv()
 
 def verify_login_status(page):
     print("Verifying login status...")
@@ -337,5 +341,5 @@ def scrape_douyin_comments(url):
             print(f"Cleanup error: {e}")
 
 if __name__ == "__main__":
-    target_url = "https://www.douyin.com/note/7595975674542054897"
+    target_url = os.getenv("DOUYIN_TARGET_URL", "https://www.douyin.com/note/7595975674542054897")
     scrape_douyin_comments(target_url)
