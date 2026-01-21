@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Douyin Comment Explorer | 抖音评论分析</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header>
+      <h1>Douyin Comment Explorer</h1>
+      <p class="subtitle">深度透视评论倾向与地域分布统计</p>
+    </header>
+
+    <div class="container">
+      <aside class="sidebar" id="stats-sidebar">
+        <div class="sidebar-header">
+          <h2>
+            <span>📊</span> 地域数据统计
+          </h2>
+          <button class="reset-link" onclick="window.clearStats()">清空</button>
+        </div>
+        <div class="stat-list" id="stat-list">
+          <!-- Stats will be injected here -->
+          <p style="color: var(--text-dim); font-size: 0.9rem">
+            点击卡片上的【计数】按钮来更新统计...
+          </p>
+        </div>
+      </aside>
+
+      <main class="feed" id="comment-feed">
+        <!-- Comments will be injected here -->
+        <div class="loading">正在加载评论数据...</div>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
