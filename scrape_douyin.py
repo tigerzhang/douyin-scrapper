@@ -115,9 +115,25 @@ def self_extract_comment(item, image_dir=None):
     try:
         # Nickname extraction
         user_el = item.query_selector('._uYOTNYZ')
-        user_text = user_el.inner_text().strip() if user_el else "Unknown"
-        if "\n作者" in user_text:
-            user_text = user_text.replace("\n作者", " [Author]")
+        user_text = "Unknown"
+        reply_to = None
+        
+        if user_el:
+            # Check for "A reply to B" structure (multiple links)
+            links = user_el.query_selector_all('a')
+            if len(links) >= 2:
+                # Format: User A -> User B
+                user_text = links[0].inner_text().strip()
+                reply_to = links[1].inner_text().strip()
+                # print(f"DEBUG: Found reply-to: {user_text} -> {reply_to}")
+            else:
+                user_text = user_el.inner_text().strip()
+
+            # Clean Author tag
+            if "\n作者" in user_text:
+                user_text = user_text.replace("\n作者", "").strip() + " [Author]"
+            if reply_to and "\n作者" in reply_to:
+                reply_to = reply_to.replace("\n作者", "").strip() + " [Author]"
 
         # Content extraction
         content_el = item.query_selector('.C7LroK_h')
@@ -171,6 +187,7 @@ def self_extract_comment(item, image_dir=None):
 
         return {
             "user": user_text,
+            "reply_to": reply_to,
             "content": content_text,
             "time": msg_time,
             "location": msg_location,
@@ -331,7 +348,7 @@ def scrape_douyin_comments(url):
         comments_data = []
         seen_ids = set()
         no_new_data_count = 0
-        max_no_new_data = 5 # If no new data 5 times in a row, stop
+        max_no_new_data = 2 # If no new data 2 times in a row, stop
         
         # New loop logic based on stability
         total_scrolls = 0

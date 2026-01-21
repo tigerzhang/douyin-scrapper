@@ -2,6 +2,7 @@ import './style.css'
 
 interface Comment {
   user: string;
+  reply_to?: string;
   content: string;
   time: string;
   location: string;
@@ -157,11 +158,18 @@ function renderComment(comment: Comment, isReply = false): string {
        </div>`
     : '';
 
+  const replyToHtml = comment.reply_to 
+    ? `<span class="reply-arrow">▶</span><span class="reply-target">${comment.reply_to || '未知'}</span>`
+    : '';
+
   return `
     <div class="comment-card ${isReply ? 'reply-card' : ''} ${isVoted ? 'voted' : ''}">
       <div class="card-header">
         <div class="user-info">
-          <span class="user-name">${comment.user || '匿名用户'}</span>
+          <div class="user-names">
+            <span class="user-name">${comment.user || '匿名用户'}</span>
+            ${replyToHtml}
+          </div>
           <div class="meta">
             <span>${comment.time}</span>
             <span>•</span>
