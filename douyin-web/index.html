@@ -18,26 +18,37 @@
       <p class="subtitle">深度透视评论倾向与地域分布统计</p>
     </header>
 
-    <div class="container">
-      <aside class="sidebar" id="stats-sidebar">
+    <div class="app-layout">
+      <aside class="note-sidebar">
         <div class="sidebar-header">
-          <h2>
-            <span>📊</span> 地域数据统计
-          </h2>
-          <button class="reset-link" onclick="window.clearStats()">清空</button>
+          <h2><span>📄</span> 抓取任务列表</h2>
         </div>
-        <div class="stat-list" id="stat-list">
-          <!-- Stats will be injected here -->
-          <p style="color: var(--text-dim); font-size: 0.9rem">
-            点击卡片上的【计数】按钮来更新统计...
-          </p>
+        <div class="note-list" id="note-list">
+          <div class="loading">加载中...</div>
         </div>
       </aside>
 
-      <main class="feed" id="comment-feed">
-        <!-- Comments will be injected here -->
-        <div class="loading">正在加载评论数据...</div>
-      </main>
+      <div class="container">
+        <aside class="sidebar" id="stats-sidebar">
+          <div class="sidebar-header">
+            <h2><span>📊</span> 地域数据统计</h2>
+            <button class="reset-link" onclick="window.clearStats()">
+              清空
+            </button>
+          </div>
+          <div class="stat-list" id="stat-list">
+            <!-- Stats will be injected here -->
+            <p style="color: var(--text-dim); font-size: 0.9rem">
+              点击卡片上的【计数】按钮来更新统计...
+            </p>
+          </div>
+        </aside>
+
+        <main class="feed" id="comment-feed">
+          <!-- Comments will be injected here -->
+          <div class="loading">请先在左侧选择一个任务</div>
+        </main>
+      </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

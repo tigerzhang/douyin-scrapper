@@ -24,12 +24,17 @@ body {
   overflow-x: hidden;
 }
 
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
 .container {
-  max-width: 1400px;
-  margin: 0 auto;
+  flex: 1;
   padding: 2rem;
   display: flex;
   gap: 2rem;
+  max-width: 1400px;
 }
 
 header {
@@ -58,7 +63,63 @@ h1 {
   font-size: 1.1rem;
 }
 
-/* Dashboard / Sidebar */
+/* Note Sidebar */
+.note-sidebar {
+  flex: 0 0 280px;
+  background: rgba(0, 0, 0, 0.2);
+  border-right: 1px solid var(--card-border);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.note-item {
+  padding: 1rem;
+  border-radius: 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.note-item:hover {
+  border-color: var(--accent-color);
+  background: rgba(254, 44, 85, 0.05);
+}
+
+.note-item.active {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+}
+
+.note-item.active .note-id {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.note-item.active .note-meta {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.note-id {
+  font-weight: 700;
+  display: block;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+}
+
+.note-meta {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+}
 .sidebar {
   flex: 0 0 320px;
   position: sticky;
@@ -137,9 +198,10 @@ h1 {
 /* Comment Feed */
 .feed {
   flex: 1;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 1.5rem;
+  max-width: 800px;
 }
 
 .comment-card {
@@ -258,6 +320,31 @@ h1 {
 .comment-card.voted {
   border-color: rgba(254, 44, 85, 0.3);
   background: rgba(254, 44, 85, 0.03);
+}
+
+
+/* Nested Replies */
+.replies-container {
+  margin-left: 1.5rem;
+  margin-top: 1rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--card-border);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.reply-card {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 12px;
+  padding: 1rem;
+  border: 1px solid var(--card-border);
+}
+
+.loading, .error {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-dim);
 }
 
 @media (max-width: 900px) {
