@@ -2,6 +2,8 @@ import json
 import time
 import random
 import os
+import requests
+import hashlib
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
@@ -49,6 +51,11 @@ def verify_login_status(page):
 
 def scrape_douyin_comments(url):
     user_data_dir = os.path.join(os.getcwd(), "douyin_user_data")
+    image_dir = os.path.join(os.getcwd(), "comment_images")
+    
+    if not os.path.exists(image_dir):
+        os.makedirs(image_dir)
+        print(f"Created image directory: {image_dir}")
     
     p = sync_playwright().start()
     try:
@@ -205,12 +212,47 @@ def scrape_douyin_comments(url):
                     unique_id = f"{user_text}_{content_text[:20]}_{msg_time}"
                     
                     if unique_id not in seen_ids and content_text != "[No Content]":
+                        # --- New: Image Extraction ---
+                        image_path = None
+                        try:
+                            # Look for img tags within the comment item
+                            img_els = item.query_selector_all('img')
+                            for img in img_els:
+                                # Filter out small icons/emojis by naturalWidth if possible
+                                # Or just skip known emoji classes if identifiable
+                                width = img.evaluate("el => el.naturalWidth")
+                                if width > 30: # Likely a real image, not an emoji
+                                    src = img.get_attribute('src')
+                                    if src and src.startswith('http'):
+                                        # Create unique filename
+                                        url_hash = hashlib.md5(src.encode()).hexdigest()
+                                        filename = f"{url_hash}.jpg"
+                                        local_path = os.path.join(image_dir, filename)
+                                        
+                                        # Download if not already saved
+                                        if not os.path.exists(local_path):
+                                            try:
+                                                response = requests.get(src, timeout=10)
+                                                if response.status_code == 200:
+                                                    with open(local_path, 'wb') as img_f:
+                                                        img_f.write(response.content)
+                                                    print(f"  Saved comment image: {filename}")
+                                            except Exception as img_err:
+                                                print(f"  Image download failed: {img_err}")
+                                        
+                                        if os.path.exists(local_path):
+                                            image_path = os.path.join("comment_images", filename)
+                                        break # Take the first large image
+                        except Exception as e:
+                            print(f"  Image extraction error: {e}")
+
                         seen_ids.add(unique_id)
                         comments_data.append({
                             "user": user_text,
                             "content": content_text,
                             "time": msg_time,
                             "location": msg_location,
+                            "image_path": image_path,
                             "scrape_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         })
                         new_in_this_batch += 1
