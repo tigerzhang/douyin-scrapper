@@ -13,6 +13,7 @@ interface Comment {
 interface ManifestEntry {
   id: string;
   url: string;
+  title: string;
   scrape_date: string;
   comment_count: number;
 }
@@ -77,7 +78,7 @@ function renderNoteList() {
   
   noteListEl.innerHTML = state.manifest.map(entry => `
     <div class="note-item ${state.selectedId === entry.id ? 'active' : ''}" onclick="window.selectNote('${entry.id}')">
-      <span class="note-id">${entry.id}</span>
+      <span class="note-id" title="ID: ${entry.id}">${entry.title || entry.id}</span>
       <div class="note-meta">
         <span>${entry.comment_count} 评论</span>
         <span>${entry.scrape_date.split(' ')[0]}</span>

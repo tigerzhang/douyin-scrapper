@@ -180,7 +180,7 @@ def self_extract_comment(item, image_dir=None):
     except:
         return None
 
-def update_manifest(base_dir, url_id, url, count):
+def update_manifest(base_dir, url_id, url, title, count):
     """Updates the global manifest.json with the latest scrape info."""
     manifest_path = os.path.join(base_dir, "manifest.json")
     manifest = []
@@ -196,6 +196,7 @@ def update_manifest(base_dir, url_id, url, count):
     entry = {
         "id": url_id,
         "url": url,
+        "title": title,
         "scrape_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "comment_count": count
     }
@@ -250,6 +251,13 @@ def scrape_douyin_comments(url):
 
         # Strict Login Verification
         verify_login_status(page)
+
+        # Get Page Title for Manifest
+        page_title = page.title()
+        # Clean up Douyin title suffix if present
+        if " - 抖音" in page_title:
+            page_title = page_title.split(" - 抖音")[0]
+        print(f"Page Title: {page_title}")
 
         # Force open comments if hidden
         print("Checking comment sidebar visibility...")
@@ -482,7 +490,7 @@ def scrape_douyin_comments(url):
         print(f"Done. Saved {len(comments_data)} comments to {result_file}")
         
         # Update Manifest
-        update_manifest(base_data_dir, url_id, url, len(comments_data))
+        update_manifest(base_data_dir, url_id, url, page_title, len(comments_data))
         
         # Keep open for a bit
         time.sleep(2)
