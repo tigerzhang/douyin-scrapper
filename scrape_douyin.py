@@ -360,27 +360,42 @@ def scrape_douyin_comments(url):
             # 1. Verification Check
             check_for_verification(page)
 
-            # 2. Expand Replies
-            # Find all expand buttons. We do this before extraction to get domestic replies.
+            # 2. Expand Replies (Iterative)
             print("Checking for reply expansion buttons...")
             try:
-                # Limit expansion to visible buttons to avoid clicking ones we already dealt with
-                expand_btns = page.query_selector_all('.comment-reply-expand-btn')
-                expanded_count = 0
-                for btn in expand_btns:
-                    try:
-                        if btn.is_visible():
-                            text = btn.inner_text()
-                            if "展开" in text or "更多" in text:
+                expansion_pass = 0
+                max_expansion_passes = 10 
+                expanded_in_this_scroll = 0
+                
+                while expansion_pass < max_expansion_passes:
+                    expanded_in_this_pass = 0
+                    # Use a broader selector to catch obfuscated classes
+                    candidate_btns = page.query_selector_all('button')
+                    
+                    for btn in candidate_btns:
+                        try:
+                            if not btn.is_visible(): continue
+                            text = btn.inner_text().strip()
+                            # Specifically target expansion: "展开更多", "展开", "更多"
+                            # Avoid collapse: "收起"
+                            if ("展开" in text or "更多" in text) and "收起" not in text:
                                 btn.click()
-                                expanded_count += 1
-                                # Small wait for animation/loading
-                                time.sleep(random.uniform(0.5, 1.0))
-                    except:
-                        continue
-                if expanded_count > 0:
-                    print(f"  -> Expanded {expanded_count} reply threads.")
-                    time.sleep(1) # Extra wait for all replies to load
+                                expanded_in_this_pass += 1
+                                expanded_in_this_scroll += 1
+                                # Small random wait for loading
+                                time.sleep(random.uniform(0.6, 1.2))
+                        except:
+                            continue
+                    
+                    if expanded_in_this_pass == 0:
+                        break
+                    
+                    print(f"  -> Pass {expansion_pass + 1}: Expanded {expanded_in_this_pass} threads.")
+                    expansion_pass += 1
+                    time.sleep(1.5) # Wait for network/rendering
+                
+                if expanded_in_this_scroll > 0:
+                     print(f"  -> Total expanded in this scroll: {expanded_in_this_scroll}")
             except Exception as e:
                 print(f"Reply expansion error: {e}")
 
