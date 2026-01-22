@@ -24,7 +24,7 @@ interface AppState {
   selectedId: string | null;
   comments: Comment[];
   counts: Record<string, number>;
-  votedIndices: string[]; // Use user+time+content as key for persistence across reloads
+  votedUsers: Record<string, string>; // Key: "selectedId:user", Value: "location"
 }
 
 const state: AppState = {
@@ -32,7 +32,7 @@ const state: AppState = {
   selectedId: null,
   comments: [],
   counts: JSON.parse(localStorage.getItem('douyin_location_counts') || '{}'),
-  votedIndices: JSON.parse(localStorage.getItem('douyin_voted_indices') || '[]')
+  votedUsers: JSON.parse(localStorage.getItem('douyin_voted_users') || '{}')
 };
 
 async function init() {
@@ -95,15 +95,18 @@ function getCommentUid(comment: Comment) {
 function toggleVote(comment: Comment) {
   const location = comment.location;
   if (!location || location === 'Unknown' || location === '未知') return;
+  if (!state.selectedId) return;
 
-  const uid = getCommentUid(comment);
-  const votePos = state.votedIndices.indexOf(uid);
+  const userKey = `${state.selectedId}:${comment.user}`;
+  const existingLocation = state.votedUsers[userKey];
   
-  if (votePos > -1) {
-    state.votedIndices.splice(votePos, 1);
-    state.counts[location] = Math.max(0, (state.counts[location] || 0) - 1);
+  if (existingLocation) {
+    // Already voted. If clicking same user, we remove the vote regardless of which comment was clicked.
+    delete state.votedUsers[userKey];
+    state.counts[existingLocation] = Math.max(0, (state.counts[existingLocation] || 0) - 1);
   } else {
-    state.votedIndices.push(uid);
+    // New vote for this user in this note
+    state.votedUsers[userKey] = location;
     state.counts[location] = (state.counts[location] || 0) + 1;
   }
 
@@ -114,7 +117,7 @@ function toggleVote(comment: Comment) {
 function clearStats() {
   if (confirm('确定要清空所有统计数据吗？')) {
     state.counts = {};
-    state.votedIndices = [];
+    state.votedUsers = {};
     saveState();
     renderContent();
   }
@@ -122,7 +125,7 @@ function clearStats() {
 
 function saveState() {
   localStorage.setItem('douyin_location_counts', JSON.stringify(state.counts));
-  localStorage.setItem('douyin_voted_indices', JSON.stringify(state.votedIndices));
+  localStorage.setItem('douyin_voted_users', JSON.stringify(state.votedUsers));
 }
 
 function renderStats() {
@@ -147,8 +150,8 @@ function renderStats() {
 }
 
 function renderComment(comment: Comment, isReply = false): string {
-  const uid = getCommentUid(comment);
-  const isVoted = state.votedIndices.includes(uid);
+  const userKey = `${state.selectedId}:${comment.user}`;
+  const isVoted = !!state.votedUsers[userKey];
   const hasImage = !!comment.image_path;
   const imageUrl = hasImage ? `/scraped_data/${state.selectedId}/${comment.image_path}` : '';
   
@@ -161,6 +164,8 @@ function renderComment(comment: Comment, isReply = false): string {
   const replyToHtml = comment.reply_to 
     ? `<span class="reply-arrow">▶</span><span class="reply-target">${comment.reply_to || '未知'}</span>`
     : '';
+
+  const uid = getCommentUid(comment);
 
   return `
     <div class="comment-card ${isReply ? 'reply-card' : ''} ${isVoted ? 'voted' : ''}">
