@@ -246,15 +246,28 @@ def scrape_douyin_comments(url):
     try:
         # Use persistent context to save login state
         print(f"Launching browser with user data dir: {user_data_dir}")
+        is_headless = os.getenv("HEADLESS", "true").lower() == "true"
+        print(f"Headless mode: {is_headless}")
+        
         context = p.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
-            headless=False,
+            headless=is_headless,
             channel="chrome", 
+            args=["--start-maximized", "--no-sandbox", "--disable-setuid-sandbox"],
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            no_viewport=True
         )
         
         page = context.pages[0] if context.pages else context.new_page()
+        
+        # Approximate maximization on Mac by matching available screen size
+        try:
+            screen_size = page.evaluate("() => ({ width: window.screen.availWidth, height: window.screen.availHeight })")
+            if screen_size['width'] > 0 and screen_size['height'] > 0:
+                print(f"Detected screen size: {screen_size['width']}x{screen_size['height']}")
+                page.set_viewport_size(screen_size)
+        except Exception as e:
+            print(f"Viewport adjustment warning: {e}")
 
         print(f"Navigating to {url}...")
         try:
@@ -275,6 +288,19 @@ def scrape_douyin_comments(url):
         if " - 抖音" in page_title:
             page_title = page_title.split(" - 抖音")[0]
         print(f"Page Title: {page_title}")
+        
+        # Try to extract total comment count from header for progress tracking
+        expected_total = 0
+        try:
+            tab_text = page.query_selector('[data-e2e="comment-switch-tab"], .comment-tab-text').inner_text()
+            # Extract number from "评论(1190)" or similar
+            import re
+            match = re.search(r'\((\d+)\)', tab_text) or re.search(r'(\d+)', tab_text)
+            if match:
+                expected_total = int(match.group(1))
+                print(f"Targeting total comments: {expected_total}")
+        except:
+            pass
 
         # Force open comments if hidden
         print("Checking comment sidebar visibility...")
@@ -342,13 +368,53 @@ def scrape_douyin_comments(url):
         except Exception as e:
             print(f"Container finding error: {e}")
             
-        if not scroll_container:
-            print("Warning: Specific container not found, will rely on WINDOW/MOUSE fallback.")
+        def find_container(page):
+            try:
+                # Target the sidebar comment container specifically
+                potential_containers = page.query_selector_all('.comment-mainContent, [data-e2e="comment-list"], .comment-list-container')
+                vis_containers = []
+                for c in potential_containers:
+                    try:
+                        if c.is_visible():
+                            rect = c.bounding_box()
+                            if rect and rect['width'] > 100 and rect['height'] > 100:
+                                vis_containers.append((c, rect['height'], c.evaluate("el => el.scrollHeight")))
+                    except: continue
+                
+                if vis_containers:
+                    # Prefer the one with the largest scrollHeight
+                    vis_containers.sort(key=lambda x: x[2], reverse=True)
+                    winner = vis_containers[0]
+                    print(f"  [DEBUG] Container Match: H={winner[1]}, ScrollH={winner[2]}")
+                    return winner[0]
+                else:
+                    print("  [DEBUG] No visible comment container found matching criteria.")
+            except Exception as e: 
+                print(f"  [DEBUG] find_container error: {e}")
+            return None
+
+        def wait_for_loading_to_clear(page, timeout=10):
+            """Wait for '加载中' or loading spinners to disappear."""
+            start_time = time.time()
+            # print(f"  [DEBUG] Waiting for loading to clear...")
+            while time.time() - start_time < timeout:
+                try:
+                    # Check for common loading text or elements
+                    loading = page.query_selector('div:has-text("加载中"), div:has-text("努力加载中"), .loading-icon')
+                    if not loading or not loading.is_visible():
+                        # Also check if the container scroll height stopped changing? Overkill for now.
+                        return True
+                    # print(f"  [DEBUG] Still loading... ({(time.time() - start_time):.1f}s)")
+                    time.sleep(1.0)
+                except:
+                    return True
+            return False
 
         comments_data = []
         seen_ids = set()
+        processed_threads = set() # Track threads that have been fully expanded
         no_new_data_count = 0
-        max_no_new_data = 2 # If no new data 2 times in a row, stop
+        max_no_new_data = 10 # Increased from 2 to allow more patience for lazy loading
         
         # New loop logic based on stability
         total_scrolls = 0
@@ -360,46 +426,7 @@ def scrape_douyin_comments(url):
             # 1. Verification Check
             check_for_verification(page)
 
-            # 2. Expand Replies (Iterative)
-            print("Checking for reply expansion buttons...")
-            try:
-                expansion_pass = 0
-                max_expansion_passes = 10 
-                expanded_in_this_scroll = 0
-                
-                while expansion_pass < max_expansion_passes:
-                    expanded_in_this_pass = 0
-                    # Use a broader selector to catch obfuscated classes
-                    candidate_btns = page.query_selector_all('button')
-                    
-                    for btn in candidate_btns:
-                        try:
-                            if not btn.is_visible(): continue
-                            text = btn.inner_text().strip()
-                            # Specifically target expansion: "展开更多", "展开", "更多"
-                            # Avoid collapse: "收起"
-                            if ("展开" in text or "更多" in text) and "收起" not in text:
-                                btn.click()
-                                expanded_in_this_pass += 1
-                                expanded_in_this_scroll += 1
-                                # Small random wait for loading
-                                time.sleep(random.uniform(0.6, 1.2))
-                        except:
-                            continue
-                    
-                    if expanded_in_this_pass == 0:
-                        break
-                    
-                    print(f"  -> Pass {expansion_pass + 1}: Expanded {expanded_in_this_pass} threads.")
-                    expansion_pass += 1
-                    time.sleep(1.5) # Wait for network/rendering
-                
-                if expanded_in_this_scroll > 0:
-                     print(f"  -> Total expanded in this scroll: {expanded_in_this_scroll}")
-            except Exception as e:
-                print(f"Reply expansion error: {e}")
-
-            # 3. Extract Comments Hierarchically
+            # 2. Extract and Expand Comments Sequentially
             new_in_this_batch = 0
             try:
                 # Find all comment items. We'll filter them to separate main comments from replies.
@@ -408,17 +435,85 @@ def scrape_douyin_comments(url):
                 # Identify main comments: they are NOT inside a replyContainer
                 main_comments = []
                 for item in all_items:
-                    # Check if this item has an ancestor with class 'replyContainer'
-                    # Or check its structure - main comments usually are the only ones with significant margins/layout
-                    # A more reliable way: an item is a MAIN comment if it's NOT inside another data-e2e="comment-item"
-                    # Wait, replies used to be siblings, now they are nested.
-                    # Let's check if the item is inside a .replyContainer
                     is_reply = item.evaluate("el => !!el.closest('.replyContainer')")
                     if not is_reply:
                         main_comments.append(item)
                 
+                print(f"  -> Found {len(main_comments)} potential main threads in view.")
+                
                 for top_el in main_comments:
                     try:
+                        # Quick ID to check if we processed this thread's expansion already
+                        # We use a snippet of text + user to avoid full extraction cost here
+                        try:
+                            comment_item = top_el.query_selector('[data-e2e="comment-display-text"]')
+                            tmp_user_el = top_el.query_selector('[data-e2e="comment-at"]')
+                            tmp_user = tmp_user_el.inner_text().strip() if tmp_user_el else "Unknown"
+                            tmp_text = comment_item.inner_text().strip()[:30] if comment_item else "NoText"
+                            thread_fingerprint = f"{tmp_user}_{tmp_text}"
+                        except Exception as e:
+                            # print(f"Fingerprint error: {e}")
+                            thread_fingerprint = None
+
+                        if thread_fingerprint and thread_fingerprint in processed_threads:
+                            # Skip heavy expansion logic if we've already done it for this thread
+                            pass
+                        else:
+                            # --- LOCAL EXPANSION for this thread ---
+                            local_expansion_pass = 0
+                            max_local_passes = 15 # Reduced from 20 but made more robust
+                            
+                            while local_expansion_pass < max_local_passes:
+                                # Target buttons more specifically
+                                local_btns = top_el.query_selector_all('button, [role="button"], .reply-expand-btn, span, p')
+                                expanded_in_this_pass = 0
+                                
+                                for btn in local_btns:
+                                    try:
+                                        if not btn.is_visible(): continue
+                                        text = btn.inner_text().strip()
+                                        if not text: continue
+                                        
+                                        is_expansion = False
+                                        # Strict expansion logic
+                                        if ("展开" in text or "更多" in text) and "收起" not in text:
+                                            # Avoid clicking "Reply" or "Share" which might be caught by 'span' or 'p'
+                                            if any(x in text for x in ["回复", "分享", "赞"]):
+                                                # Use regex-like check: must have "展开" AND (digits or "回复")
+                                                import re
+                                                if re.search(r'展开\d+条回复|展开更多', text):
+                                                    is_expansion = True
+                                                else:
+                                                    continue
+                                            else:
+                                                is_expansion = True
+                                        elif "条回复" in text and any(char.isdigit() for char in text) and "收起" not in text:
+                                            is_expansion = True
+                                        elif "查看" in text and "回复" in text and "收起" not in text:
+                                            is_expansion = True
+                                            
+                                        if is_expansion:
+                                            if "评论(" in text: continue 
+                                            h = btn.evaluate("el => el.offsetHeight")
+                                            if h < 5: continue
+                                            
+                                            # print(f"    [DEBUG] Clicking expansion button: '{text}'")
+                                            btn.click()
+                                            expanded_in_this_pass += 1
+                                            # Wait longer for expansion to happen
+                                            time.sleep(random.uniform(2.0, 3.0)) 
+                                            # Sometimes clicking one button expands others, so we re-scan
+                                            break 
+                                    except: continue
+                                
+                                if expanded_in_this_pass == 0: break
+                                local_expansion_pass += 1
+                                time.sleep(0.5)
+                            
+                            if thread_fingerprint:
+                                processed_threads.add(thread_fingerprint)
+
+                        # --- EXTRACTION for this thread ---
                         comment_data = self_extract_comment(top_el, image_dir)
                         if not comment_data: continue
                         
@@ -451,17 +546,21 @@ def scrape_douyin_comments(url):
                                     if not any(f"{er['user']}_{er['content'][:20]}_{er['time']}" == r_uid for er in existing_comment["replies"]):
                                         existing_comment["replies"].append(r)
                                         new_in_this_batch += 1
-                        
+                                        
                     except Exception as item_err:
+                        # print(f"    Item Error: {item_err}")
                         continue
             except Exception as e:
-                print(f"Extraction error: {e}")
+                print(f"Extraction execution error: {e}")
 
             if new_in_this_batch > 0:
-                print(f"  -> Extracted {new_in_this_batch} new comments. Total: {len(comments_data)}")
+                # Count total items (including replies) for better progress logging
+                total_items = len(comments_data) + sum(len(c.get("replies", [])) for c in comments_data)
+                progress = f" (Progress: {total_items}/{expected_total})" if expected_total > 0 else ""
+                print(f"  -> Extracted {new_in_this_batch} new comments{progress}. Unique Threads: {len(comments_data)}, Total Items: {total_items}")
                 no_new_data_count = 0
             else:
-                print("  -> No new comments extracted.")
+                print(f"  -> No new comments extracted. (Attempt {no_new_data_count + 1}/{max_no_new_data})")
                 no_new_data_count += 1
             
             if no_new_data_count >= max_no_new_data:
@@ -470,44 +569,59 @@ def scrape_douyin_comments(url):
 
             # 2. Scroll Logic
             scrolled = False
+            scroll_container = find_container(page)
             
             # Method A: Targeted Container Scroll
             if scroll_container:
                 try:
-                    # Debug scroll position
-                    # prev_top = scroll_container.evaluate("el => el.scrollTop")
+                    # Attempt 1: Targeted scrollIntoView on the LAST comment
+                    comment_items = scroll_container.query_selector_all('[data-e2e="comment-item"]')
+                    if comment_items:
+                        last_item = comment_items[-1]
+                        print(f"  -> Scrolling to last comment in view...")
+                        last_item.scroll_into_view_if_needed()
+                        time.sleep(0.5)
                     
-                    # JS Scroll
-                    # scroll_container.evaluate("el => el.scrollTop = el.scrollHeight")
+                    # Attempt 2: JS Direct Scroll with Event Dispatch
+                    scroll_container.evaluate("""(el) => {
+                        el.scrollTop = el.scrollHeight;
+                        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+                        el.dispatchEvent(new Event('wheel', { bubbles: true }));
+                    }""")
                     
-                    # Mouse Wheel - Aggressive
+                    # Attempt 3: Mouse Wheel on the right side
                     box = scroll_container.bounding_box()
                     if box:
-                        page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
-                        for _ in range(3):
+                        target_x = box['x'] + box['width']/2
+                        target_y = box['y'] + box['height']/2
+                        page.mouse.move(target_x, target_y)
+                        page.mouse.click(target_x, target_y) # Focus explicitly
+                        for _ in range(5):
                             page.mouse.wheel(0, 1000)
-                            time.sleep(0.3)
-                    
+                            time.sleep(0.1)
                     scrolled = True
                 except Exception as e:
-                    print(f"Scroll error: {e}")
+                    print(f"  [DEBUG] Scroll iteration error: {e}")
             
             if not scrolled:
-                # Fallback: Blind Mouse Wheel at center of screen
-                # This works if the comment modal is open in the center/sidebar
-                print("Doing blind mouse value scroll (center of screen)...")
+                # Fallback for maximized windows: Target the right sidebar area
+                print("Doing targeted sidebar scroll fallback...")
                 try:
                     vp = page.viewport_size
                     if vp:
-                        page.mouse.move(vp['width'] / 2, vp['height'] / 2)
-                        for _ in range(3):
+                        page.mouse.move(vp['width'] - 200, vp['height'] / 2)
+                        for _ in range(5):
                             page.mouse.wheel(0, 1000)
-                            time.sleep(0.3)
+                            time.sleep(0.1)
                 except Exception as e:
                     print(f"Fallback scroll error: {e}")
             
-            # Random wait
-            time.sleep(random.uniform(2, 4))
+            # 3. Targeted Wait for Loading to Clear
+            print("Waiting for loading to clear...")
+            wait_for_loading_to_clear(page)
+            
+            # Final slack wait
+            time.sleep(random.uniform(1, 2))
             
             # Check login or verify slider
             if page.query_selector('.login-mask') or "登录" in page.title():
