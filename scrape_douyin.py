@@ -1,6 +1,7 @@
 import json
 import time
 import random
+import re
 import os
 import requests
 import hashlib
@@ -51,6 +52,7 @@ def check_for_verification(page):
         print("\n!!! VERIFICATION DETECTED !!!")
         print("Please resolve the captcha/verification in the browser window.")
         print("Waiting for verification to be dismissed...")
+        last_log = time.time()
         while True:
             still_visible = False
             for selector in verification_selectors:
@@ -64,6 +66,9 @@ def check_for_verification(page):
             if not still_visible:
                 print("Verification cleared. Resuming...\n")
                 break
+            if time.time() - last_log > 10:
+                print("...Still waiting for verification...")
+                last_log = time.time()
             time.sleep(2)
         return True
     return False
@@ -192,7 +197,9 @@ def self_extract_comment(item, image_dir=None):
             "time": msg_time,
             "location": msg_location,
             "image_path": image_path,
-            "scrape_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "scrape_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "replies_scraped": False,
+            "replies": []
         }
     except:
         return None
@@ -227,6 +234,7 @@ def update_manifest(base_dir, url_id, url, title, count):
     print(f"Updated manifest: {manifest_path}")
 
 def scrape_douyin_comments(url):
+    print(f"Starting scrape_douyin_comments for {url}...")
     # Extract unique ID from URL for directory name
     parsed_url = urlparse(url)
     url_path = parsed_url.path.strip('/')
@@ -276,9 +284,6 @@ def scrape_douyin_comments(url):
         except Exception as e:
             print(f"Navigation warning: {e}")
 
-        except Exception as e:
-            print(f"Navigation warning: {e}")
-
         # Strict Login Verification
         verify_login_status(page)
 
@@ -304,28 +309,56 @@ def scrape_douyin_comments(url):
 
         # Force open comments if hidden
         print("Checking comment sidebar visibility...")
-        if not page.is_visible('.comment-mainContent'):
-            print("Sidebar hidden. Attempting to open...")
-            
-            # Check for blocking modal FIRST
-            for _ in range(60): # Check for up to 30s
-                modal = page.query_selector('.login-mask, #login-full-panel, [data-e2e="login-close"]')
-                if modal and modal.is_visible():
-                     print("!!! BLOCKING MODAL DETECTED !!!")
-                     print("Please close the login/scan window to proceed.")
-                     time.sleep(2)
-                else:
-                     break
+        
+        # 1. Close any blocking modals first
+        blocking_selectors = [
+            '.login-mask', 
+            '#login-full-panel', 
+            '[data-e2e="login-close"]', 
+            '.trust-login-dialog-mask',
+            '.vc-mask'
+        ]
+        
+        for _ in range(5): # Quick initial checks
+            for selector in blocking_selectors:
+                try:
+                    modal = page.query_selector(selector)
+                    if modal and modal.is_visible():
+                        print(f"!!! BLOCKING MODAL DETECTED: {selector} !!!")
+                        # Try to find a close button within or use escape key
+                        close_btn = modal.query_selector('[class*="close"], [class*="Close"]')
+                        if close_btn:
+                            print("Attempting to click close button...")
+                            close_btn.click()
+                        else:
+                            print("No clear close button. Pressing Escape...")
+                            page.keyboard.press("Escape")
+                        time.sleep(2)
+                except: pass
 
-            try:
-                 comment_tab = page.query_selector('[data-e2e="comment-switch-tab"]') or page.query_selector('text=/评论\\(\\d+\\)/') 
-                 if comment_tab:
-                     print("Clicking comment tab...")
-                     comment_tab.click()
-                     time.sleep(3)
-            except Exception as e:
-                print(f"Tab click warning: {e}")
-                print("Tip: If a login modal is blocking, please close it.")
+        # 2. Attempt to click comment tab
+        try:
+            # We look for the tab multiple times
+            for attempt in range(5):
+                if page.is_visible('.comment-mainContent'):
+                    print("Comments section is already visible.")
+                    break
+                    
+                comment_tab = page.query_selector('[data-e2e="comment-switch-tab"]') or page.query_selector(r'text=/评论\(\d+\)/') 
+                if comment_tab:
+                    print(f"Attempt {attempt+1}: Clicking comment tab...")
+                    # Use force=True because sometimes Douyin has invisible overlays even after modals are "gone"
+                    comment_tab.click(force=True, timeout=5000)
+                    time.sleep(3)
+                    if page.is_visible('.comment-mainContent'):
+                        print(">> SUCCESS: Comments tab opened.")
+                        break
+                else:
+                    print(f"Attempt {attempt+1}: Comment tab not found in DOM yet. Waiting...")
+                    time.sleep(2)
+        except Exception as e:
+            print(f"Tab click warning: {e}")
+            print("Tip: If a login modal is still blocking, please resolve it manually.")
                 
         # Find the specific scrollable container
         print("Locating scrollable comment container...")
@@ -410,236 +443,202 @@ def scrape_douyin_comments(url):
                     return True
             return False
 
+        # Load existing data if resuming
+        result_file = os.path.join(target_dir, 'comments.json')
         comments_data = []
         seen_ids = set()
-        processed_threads = set() # Track threads that have been fully expanded
+        if os.path.exists(result_file):
+            try:
+                with open(result_file, 'r', encoding='utf-8') as f:
+                    comments_data = json.load(f)
+                    for c in comments_data:
+                        uid = f"{c['user']}_{c['content'][:20]}_{c['time']}"
+                        seen_ids.add(uid)
+                print(f"Resuming with {len(comments_data)} existing comments.")
+            except: pass
+
+        # --- Phase 1: Rapid Top-Level Comment Collection ---
+        print("\n--- PHASE 1: Collecting Top-Level Comments ---")
         no_new_data_count = 0
-        max_no_new_data = 10 # Increased from 2 to allow more patience for lazy loading
-        
-        # New loop logic based on stability
+        max_no_new_data = 15
         total_scrolls = 0
         
         while True:
             total_scrolls += 1
-            print(f"--- Scroll #{total_scrolls} ---")
-            
-            # 1. Verification Check
             check_for_verification(page)
-
-            # 2. Extract and Expand Comments Sequentially
-            new_in_this_batch = 0
-            try:
-                # Find all comment items. We'll filter them to separate main comments from replies.
-                all_items = page.query_selector_all('[data-e2e="comment-item"]')
-                
-                # Identify main comments: they are NOT inside a replyContainer
-                main_comments = []
-                for item in all_items:
+            
+            # Find main comments in current view
+            all_items = page.query_selector_all('[data-e2e="comment-item"]')
+            new_in_this_scroll = 0
+            seen_in_this_scroll = 0
+            
+            for item in all_items:
+                try:
+                    # Check if it's a main comment
                     is_reply = item.evaluate("el => !!el.closest('.replyContainer')")
-                    if not is_reply:
-                        main_comments.append(item)
-                
-                print(f"  -> Found {len(main_comments)} potential main threads in view.")
-                
-                for top_el in main_comments:
-                    try:
-                        # Quick ID to check if we processed this thread's expansion already
-                        # We use a snippet of text + user to avoid full extraction cost here
-                        try:
-                            comment_item = top_el.query_selector('[data-e2e="comment-display-text"]')
-                            tmp_user_el = top_el.query_selector('[data-e2e="comment-at"]')
-                            tmp_user = tmp_user_el.inner_text().strip() if tmp_user_el else "Unknown"
-                            tmp_text = comment_item.inner_text().strip()[:30] if comment_item else "NoText"
-                            thread_fingerprint = f"{tmp_user}_{tmp_text}"
-                        except Exception as e:
-                            # print(f"Fingerprint error: {e}")
-                            thread_fingerprint = None
-
-                        if thread_fingerprint and thread_fingerprint in processed_threads:
-                            # Skip heavy expansion logic if we've already done it for this thread
-                            pass
-                        else:
-                            # --- LOCAL EXPANSION for this thread ---
-                            local_expansion_pass = 0
-                            max_local_passes = 15 # Reduced from 20 but made more robust
-                            
-                            while local_expansion_pass < max_local_passes:
-                                # Target buttons more specifically
-                                local_btns = top_el.query_selector_all('button, [role="button"], .reply-expand-btn, span, p')
-                                expanded_in_this_pass = 0
-                                
-                                for btn in local_btns:
-                                    try:
-                                        if not btn.is_visible(): continue
-                                        text = btn.inner_text().strip()
-                                        if not text: continue
-                                        
-                                        is_expansion = False
-                                        # Strict expansion logic
-                                        if ("展开" in text or "更多" in text) and "收起" not in text:
-                                            # Avoid clicking "Reply" or "Share" which might be caught by 'span' or 'p'
-                                            if any(x in text for x in ["回复", "分享", "赞"]):
-                                                # Use regex-like check: must have "展开" AND (digits or "回复")
-                                                import re
-                                                if re.search(r'展开\d+条回复|展开更多', text):
-                                                    is_expansion = True
-                                                else:
-                                                    continue
-                                            else:
-                                                is_expansion = True
-                                        elif "条回复" in text and any(char.isdigit() for char in text) and "收起" not in text:
-                                            is_expansion = True
-                                        elif "查看" in text and "回复" in text and "收起" not in text:
-                                            is_expansion = True
-                                            
-                                        if is_expansion:
-                                            if "评论(" in text: continue 
-                                            h = btn.evaluate("el => el.offsetHeight")
-                                            if h < 5: continue
-                                            
-                                            # print(f"    [DEBUG] Clicking expansion button: '{text}'")
-                                            btn.click()
-                                            expanded_in_this_pass += 1
-                                            # Wait longer for expansion to happen
-                                            time.sleep(random.uniform(2.0, 3.0)) 
-                                            # Sometimes clicking one button expands others, so we re-scan
-                                            break 
-                                    except: continue
-                                
-                                if expanded_in_this_pass == 0: break
-                                local_expansion_pass += 1
-                                time.sleep(0.5)
-                            
-                            if thread_fingerprint:
-                                processed_threads.add(thread_fingerprint)
-
-                        # --- EXTRACTION for this thread ---
-                        comment_data = self_extract_comment(top_el, image_dir)
-                        if not comment_data: continue
-                        
-                        unique_id = f"{comment_data['user']}_{comment_data['content'][:20]}_{comment_data['time']}"
-                        
-                        # Find all replies nested INSIDE this main comment
-                        replies = []
-                        reply_container = top_el.query_selector('.replyContainer')
-                        if reply_container:
-                            reply_items = reply_container.query_selector_all('[data-e2e="comment-item"]')
-                            for r_item in reply_items:
-                                r_data = self_extract_comment(r_item, image_dir)
-                                if r_data:
-                                    replies.append(r_data)
-                        
-                        if unique_id not in seen_ids:
-                            comment_data["replies"] = replies
-                            seen_ids.add(unique_id)
-                            comments_data.append(comment_data)
-                            new_in_this_batch += 1
-                        else:
-                            # Main comment seen, check for new replies
-                            existing_comment = next((c for c in comments_data if f"{c['user']}_{c['content'][:20]}_{c['time']}" == unique_id), None)
-                            if existing_comment:
-                                if "replies" not in existing_comment:
-                                    existing_comment["replies"] = []
-                                
-                                for r in replies:
-                                    r_uid = f"{r['user']}_{r['content'][:20]}_{r['time']}"
-                                    if not any(f"{er['user']}_{er['content'][:20]}_{er['time']}" == r_uid for er in existing_comment["replies"]):
-                                        existing_comment["replies"].append(r)
-                                        new_in_this_batch += 1
-                                        
-                    except Exception as item_err:
-                        # print(f"    Item Error: {item_err}")
-                        continue
-            except Exception as e:
-                print(f"Extraction execution error: {e}")
-
-            if new_in_this_batch > 0:
-                # Count total items (including replies) for better progress logging
-                total_items = len(comments_data) + sum(len(c.get("replies", [])) for c in comments_data)
-                progress = f" (Progress: {total_items}/{expected_total})" if expected_total > 0 else ""
-                print(f"  -> Extracted {new_in_this_batch} new comments{progress}. Unique Threads: {len(comments_data)}, Total Items: {total_items}")
+                    if is_reply: continue
+                    
+                    c_data = self_extract_comment(item, image_dir)
+                    if not c_data: continue
+                    
+                    uid = f"{c_data['user']}_{c_data['content'][:20]}_{c_data['time']}"
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        comments_data.append(c_data)
+                        new_in_this_scroll += 1
+                    else:
+                        seen_in_this_scroll += 1
+                except: continue
+            
+            if new_in_this_scroll > 0:
+                print(f"  Scroll #{total_scrolls}: Found {new_in_this_scroll} new comments. (Total: {len(comments_data)})")
                 no_new_data_count = 0
+                # Intermediate save
+                with open(result_file, 'w', encoding='utf-8') as f:
+                    json.dump(comments_data, f, ensure_ascii=False, indent=2)
             else:
-                print(f"  -> No new comments extracted. (Attempt {no_new_data_count + 1}/{max_no_new_data})")
                 no_new_data_count += 1
+                if seen_in_this_scroll > 0:
+                    print(f"  Scroll #{total_scrolls}: Re-traversing {seen_in_this_scroll} known comments... ({no_new_data_count}/{max_no_new_data})")
+                else:
+                    print(f"  Scroll #{total_scrolls}: No items found in view. ({no_new_data_count}/{max_no_new_data})")
             
             if no_new_data_count >= max_no_new_data:
-                print("Stopping: No new data found for several scrolls.")
+                print("Phase 1 Complete: No more new top-level comments found.")
                 break
 
-            # 2. Scroll Logic
-            scrolled = False
+            # Scroll down
             scroll_container = find_container(page)
-            
-            # Method A: Targeted Container Scroll
             if scroll_container:
-                try:
-                    # Attempt 1: Targeted scrollIntoView on the LAST comment
-                    comment_items = scroll_container.query_selector_all('[data-e2e="comment-item"]')
-                    if comment_items:
-                        last_item = comment_items[-1]
-                        print(f"  -> Scrolling to last comment in view...")
-                        last_item.scroll_into_view_if_needed()
-                        time.sleep(0.5)
-                    
-                    # Attempt 2: JS Direct Scroll with Event Dispatch
-                    scroll_container.evaluate("""(el) => {
-                        el.scrollTop = el.scrollHeight;
-                        el.dispatchEvent(new Event('scroll', { bubbles: true }));
-                        el.dispatchEvent(new Event('wheel', { bubbles: true }));
-                    }""")
-                    
-                    # Attempt 3: Mouse Wheel on the right side
-                    box = scroll_container.bounding_box()
-                    if box:
-                        target_x = box['x'] + box['width']/2
-                        target_y = box['y'] + box['height']/2
-                        page.mouse.move(target_x, target_y)
-                        page.mouse.click(target_x, target_y) # Focus explicitly
-                        for _ in range(5):
-                            page.mouse.wheel(0, 1000)
-                            time.sleep(0.1)
-                    scrolled = True
-                except Exception as e:
-                    print(f"  [DEBUG] Scroll iteration error: {e}")
+                scroll_container.evaluate("el => el.scrollTop = el.scrollHeight")
+            else:
+                page.mouse.wheel(0, 3000)
             
-            if not scrolled:
-                # Fallback for maximized windows: Target the right sidebar area
-                print("Doing targeted sidebar scroll fallback...")
-                try:
-                    vp = page.viewport_size
-                    if vp:
-                        page.mouse.move(vp['width'] - 200, vp['height'] / 2)
-                        for _ in range(5):
-                            page.mouse.wheel(0, 1000)
-                            time.sleep(0.1)
-                except Exception as e:
-                    print(f"Fallback scroll error: {e}")
-            
-            # 3. Targeted Wait for Loading to Clear
-            print("Waiting for loading to clear...")
             wait_for_loading_to_clear(page)
-            
-            # Final slack wait
-            time.sleep(random.uniform(1, 2))
-            
-            # Check login or verify slider
-            if page.query_selector('.login-mask') or "登录" in page.title():
-                 print("Login interruption detected. Please handle in browser.")
-                 time.sleep(5)
+            time.sleep(random.uniform(1.0, 2.0))
 
-        # Save
-        result_file = os.path.join(target_dir, 'comments.json')
-        with open(result_file, 'w', encoding='utf-8') as f:
-            json.dump(comments_data, f, ensure_ascii=False, indent=2)
+        # --- Phase 2: Targeted Reply Expansion ---
+        print("\n--- PHASE 2: Expanding Replies ---")
+        
+        # Scroll back to top to begin systematic expansion
+        scroll_container = find_container(page)
+        if scroll_container:
+            print("Scrolling back to top for Phase 2...")
+            scroll_container.evaluate("el => el.scrollTop = 0")
+            time.sleep(2)
+
+        for i, comment in enumerate(comments_data):
+            if comment.get("replies_scraped"):
+                continue
             
-        print(f"Done. Saved {len(comments_data)} comments to {result_file}")
-        
-        # Update Manifest
+            print(f"  [{i+1}/{len(comments_data)}] Searching for: {comment['user']} - {comment['content'][:30]}...")
+            
+            # Find the comment element in the DOM
+            target_uid = f"{comment['user']}_{comment['content'][:20]}_{comment['time']}"
+            target_el = None
+            
+            # Re-scroll until found (since it's a virtualized list)
+            max_re_scrolls = 20 # Reduced for debugging
+            for rs in range(max_re_scrolls):
+                try:
+                    all_items = page.query_selector_all('[data-e2e="comment-item"]')
+                    # print(f"    Scroll {rs}: {len(all_items)} items in DOM.")
+                    for item in all_items:
+                        try:
+                            # Extract quick fingerprint
+                            user_el = item.query_selector('._uYOTNYZ')
+                            content_el = item.query_selector('.C7LroK_h')
+                            if not user_el or not content_el: continue
+                            
+                            u_text = user_el.inner_text().strip()
+                            if "\n作者" in u_text: u_text = u_text.replace("\n作者", "").strip() + " [Author]"
+                            
+                            # Match UID
+                            if u_text == comment['user'] and comment['content'][:20] in content_el.inner_text():
+                                target_el = item
+                                break
+                        except: continue
+                    
+                    if target_el: break
+                    
+                    # If not found, scroll down
+                    if scroll_container:
+                        scroll_container.evaluate("el => el.scrollTop += 500")
+                    else:
+                        page.mouse.wheel(0, 500)
+                    time.sleep(0.3)
+                except Exception as e:
+                    print(f"    Error during re-scroll {rs}: {e}")
+                    break
+            
+            if not target_el:
+                print(f"    [-] Could not find in DOM after {max_re_scrolls} scrolls. (User: {comment['user']})")
+                continue
+            
+            try:
+                print(f"    [+] Found. Scrolling...")
+                target_el.scroll_into_view_if_needed(timeout=5000)
+                time.sleep(1)
+            except Exception as e:
+                print(f"    [-] Scroll failed: {e}. Moving to next thread.")
+                continue
+            
+            # Robust Expansion Loop (inspired by debug_replies.py)
+            expansion_passes = 0
+            max_expansion_passes = 15
+            any_expanded = False
+            
+            while expansion_passes < max_expansion_passes:
+                clicked_any = False
+                btns = target_el.query_selector_all('button, [role="button"], span, p')
+                
+                for btn in btns:
+                    try:
+                        if not btn.is_visible(): continue
+                        text = btn.inner_text().strip()
+                        if not text: continue
+                        
+                        is_expansion = False
+                        if ("展开" in text or "更多" in text or "条回复" in text or "查看" in text) and "收起" not in text:
+                            if any(x in text for x in ["回复", "分享", "赞"]):
+                                import re
+                                if re.search(r'展开\d+条回复|展开更多|更多回复', text):
+                                    is_expansion = True
+                                else: continue
+                            else: is_expansion = True
+                        
+                        if is_expansion:
+                            # print(f"      Clicking: {text}")
+                            btn.click()
+                            clicked_any = True
+                            any_expanded = True
+                            time.sleep(random.uniform(2.0, 3.5))
+                            break # Re-scan DOM
+                    except: continue
+                
+                if not clicked_any: break
+                expansion_passes += 1
+            
+            # Extract replies
+            replies = []
+            reply_container = target_el.query_selector('.replyContainer')
+            if reply_container:
+                reply_items = reply_container.query_selector_all('[data-e2e="comment-item"]')
+                for r_item in reply_items:
+                    r_data = self_extract_comment(r_item, image_dir)
+                    if r_data:
+                        replies.append(r_data)
+            
+            comment["replies"] = replies
+            comment["replies_scraped"] = True
+            print(f"    Found {len(replies)} replies.")
+            
+            # Save progress after EACH thread for maximum stability
+            with open(result_file, 'w', encoding='utf-8') as f:
+                json.dump(comments_data, f, ensure_ascii=False, indent=2)
+
+        print(f"\nScraping Complete. Final count: {len(comments_data)} threads.")
         update_manifest(base_data_dir, url_id, url, page_title, len(comments_data))
-        
-        # Keep open for a bit
-        time.sleep(2)
     
     finally:
         # Critical: Close context to ensure cookies/local storage are saved to the persistent dir
@@ -652,5 +651,5 @@ def scrape_douyin_comments(url):
             print(f"Cleanup error: {e}")
 
 if __name__ == "__main__":
-    target_url = os.getenv("DOUYIN_TARGET_URL", "https://www.douyin.com/note/7595975674542054897")
+    target_url = "https://v.douyin.com/sUt6tM1Aaic/"
     scrape_douyin_comments(target_url)
